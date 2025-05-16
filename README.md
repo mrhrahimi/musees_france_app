@@ -64,3 +64,9 @@ musees_france_app/
 Projet développé pour l’étude de cas **données culturelles interactives**.
 
 > N'hésitez pas à forker ou proposer des améliorations 🚀
+
+---
+
+## 🌍 Accès public à l'application
+
+👉 Lancer l'application en ligne : [https://museesdefrance.shinyapps.io/musees_france_app/](https://museesdefrance.shinyapps.io/musees_france_app/)
