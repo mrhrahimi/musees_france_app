@@ -48,7 +48,6 @@ ui <- fluidPage(
   )
 )
 
-# The server function remains the same as the final version
 server <- function(input, output, session) {
   observe({
     req(input$region)
