@@ -4,130 +4,184 @@ source("global.R")
 
 ui <- fluidPage(
   theme = shinytheme("flatly"),
-  titlePanel("🚲 Vélib"),
+  titlePanel("🏛️ Musées de France"),
   tabsetPanel(
     tabPanel("🗺️ Carte",
-             br(),
-             leafletOutput("map", height = 600)
+             sidebarLayout(
+               sidebarPanel(
+                 selectInput("region", "Filtrer par région :", choices = c("Toutes", sort(unique(musees$region)))),
+                 uiOutput("departement_ui")
+               ),
+               mainPanel(
+                 leafletOutput("musee_map", height = 550)
+               )
+             )
     ),
-    tabPanel("🏙️ Par commune",
-             br(),
-             selectInput("commune", "Choisir une commune", choices = sort(unique(velib$Commune))),
-             DTOutput("table")
+    tabPanel("📋 Liste des musées",
+             DTOutput("musee_table"),
+             downloadButton("download_csv", "📥 Exporter en CSV")
     ),
-    tabPanel("📍 Recherche par adresse",
-             br(),
-             textInput("address", "Entrez une adresse en Île-de-France :"),
-             actionButton("search", "🔍 Rechercher"),
-             leafletOutput("near_map", height = 500),
-             DTOutput("near_table")
+    tabPanel("🔍 Recherche par nom",
+             textInput("search", "Nom contient :", value = ""),
+             DTOutput("search_table")
     ),
     tabPanel("📊 Statistiques",
-             br(),
-             plotOutput("hist_commune"),
-             br(),
-             plotOutput("bike_type_ratio")
+             fluidRow(
+               column(6, plotOutput("bar_region")),
+               column(6, plotOutput("bar_dept"))
+             )
+    ),
+    tabPanel("📍 Musées à proximité",
+             sidebarLayout(
+               sidebarPanel(
+                 textInput("address", "Entrez une adresse (ex: 8 rue de Rivoli, Paris)", ""),
+                 sliderInput("radius", "Rayon (km)", min = 1, max = 50, value = 10),
+                 actionButton("go", "Rechercher"),
+                 downloadButton("download_prox", "📥 Export proximité")
+               ),
+               mainPanel(
+                 leafletOutput("prox_map", height = 500),
+                 DTOutput("prox_table")
+               )
+             )
     )
   )
 )
 
+# The server function remains the same as the final version
 server <- function(input, output, session) {
-
-  color_pal <- colorNumeric(palette = "Dark2", domain = velib$`Nombre total vélos disponibles`)
-
-  output$map <- renderLeaflet({
-    leaflet(data = velib) %>%
+  observe({
+    req(input$region)
+    if (input$region == "Toutes") {
+      updateSelectInput(session, "dept", choices = c("Tous", sort(unique(musees$departement))))
+    } else {
+      choix <- musees %>% filter(region == input$region) %>% pull(departement) %>% unique() %>% sort()
+      updateSelectInput(session, "dept", choices = c("Tous", choix))
+    }
+  })
+  
+  output$departement_ui <- renderUI({
+    choix <- if (input$region == "Toutes") {
+      sort(unique(musees$departement))
+    } else {
+      sort(unique(musees[musees$region == input$region, "departement"]))
+    }
+    selectInput("dept", "Filtrer par département :", choices = c("Tous", choix))
+  })
+  
+  filtered_data <- reactive({
+    df <- musees
+    if (input$region != "Toutes") df <- df %>% filter(region == input$region)
+    if (input$dept != "Tous") df <- df %>% filter(departement == input$dept)
+    df
+  })
+  
+  output$musee_map <- renderLeaflet({
+    leaflet(data = filtered_data()) %>%
       addProviderTiles(providers$CartoDB.Positron) %>%
       addCircleMarkers(
-        lng = ~longitude,
-        lat = ~latitude,
-        radius = 6,
-        color = ~color_pal(`Nombre total vélos disponibles`),
+        lng = ~longitude, lat = ~latitude,
+        radius = 5, color = "darkblue",
         popup = ~paste0(
-          "<b>", `Nom station`, "</b><br>",
-          "Commune : ", Commune, "<br>",
-          "🚲 Total vélos : ", `Nombre total vélos disponibles`, "<br>",
-          "⚡ Vélos électriques : ", `Vélos électriques disponibles`, "<br>",
-          "🔲 Bornettes libres : ", `Nombre bornettes libres`
-        ),
-        clusterOptions = markerClusterOptions()
+          "<b>", nom, "</b><br>",
+          adresse, "<br>", ville, " (", cp, ")<br>",
+          ifelse(!is.na(telephone), paste0("📞 ", telephone, "<br>"), ""),
+          ifelse(!is.na(url), paste0("🔗 <a href='http://", url, "' target='_blank'>Site web</a><br>"), "")
+        )
       )
   })
-
-  output$table <- renderDT({
-    req(input$commune)
-    velib %>%
-      filter(Commune == input$commune) %>%
-      select(`Nom station`, Commune, `Nombre total vélos disponibles`,
-             `Vélos mécaniques disponibles`, `Vélos électriques disponibles`, `Nombre bornettes libres`) %>%
+  
+  output$musee_table <- renderDT({
+    musees %>%
+      select(nom, adresse, ville, cp, telephone, url, departement, region) %>%
       datatable(options = list(pageLength = 10))
   })
-
-  observeEvent(input$search, {
-    req(input$address)
-
-    coords <- tryCatch({
-      tibble(address = input$address) %>%
-        geocode(address = address, method = "osm", lat = latitude, long = longitude, limit = 1)
-    }, error = function(e) {
-      showNotification("Erreur géocodage : " %+% e$message, type = "error")
-      return(NULL)
-    })
-
-    if (is.null(coords) || is.na(coords$longitude)) {
-      showNotification("Adresse introuvable ou mal formatée.", type = "warning")
-      return()
+  
+  output$download_csv <- downloadHandler(
+    filename = function() {"musees_france.csv"},
+    content = function(file) {
+      write.csv(musees, file, row.names = FALSE)
     }
-
-    user_point <- c(coords$longitude, coords$latitude)
-    velib$distance <- distHaversine(matrix(c(as.numeric(velib$longitude), as.numeric(velib$latitude)), ncol = 2), user_point)
-
-    nearest <- velib %>% filter(distance <= 500)
-
-    output$near_map <- renderLeaflet({
-      leaflet(data = nearest) %>%
-        addProviderTiles(providers$CartoDB.Positron) %>%
-        setView(lng = coords$longitude, lat = coords$latitude, zoom = 16) %>%
-        addCircleMarkers(lng = ~longitude, lat = ~latitude,
-                         popup = ~paste0("<b>", `Nom station`, "</b><br>Distance : ", round(distance), " m<br>",
-                                         "⚡ Vélos électriques : ", `Vélos électriques disponibles`),
-                         color = "red") %>%
-        addCircleMarkers(lng = coords$longitude, lat = coords$latitude, color = "blue", radius = 6,
-                         popup = "📍 Adresse recherchée")
-    })
-
-    output$near_table <- renderDT({
-      nearest %>%
-        select(`Nom station`, Commune, distance, `Nombre total vélos disponibles`, `Vélos électriques disponibles`) %>%
-        arrange(distance) %>%
-        datatable()
-    })
+  )
+  
+  output$search_table <- renderDT({
+    if (input$search == "") {
+      return(datatable(data.frame(Message = "Tapez un mot-clé pour lancer la recherche")))
+    }
+    
+    musees %>%
+      filter(str_detect(str_to_lower(nom), str_to_lower(input$search))) %>%
+      select(nom, adresse, ville, cp, telephone, url, departement, region) %>%
+      datatable()
   })
-
-  output$hist_commune <- renderPlot({
-    velib %>%
-      group_by(Commune) %>%
-      summarise(total = sum(`Nombre total vélos disponibles`, na.rm = TRUE)) %>%
-      top_n(10, total) %>%
-      arrange(total) %>%
-      ggplot(aes(x = reorder(Commune, total), y = total)) +
+  
+  output$bar_region <- renderPlot({
+    musees %>%
+      count(region, sort = TRUE) %>%
+      top_n(10) %>%
+      ggplot(aes(x = reorder(region, n), y = n)) +
       geom_col(fill = "steelblue") +
       coord_flip() +
-      labs(x = "Commune", y = "Vélos disponibles", title = "Top 10 communes avec le plus de vélos")
+      labs(x = "Région", y = "Nombre de musées", title = "Top 10 régions")
   })
-
-  output$bike_type_ratio <- renderPlot({
-    velib %>%
-      summarise(
-        `Vélos mécaniques` = sum(`Vélos mécaniques disponibles`, na.rm = TRUE),
-        `Vélos électriques` = sum(`Vélos électriques disponibles`, na.rm = TRUE)
-      ) %>%
-      pivot_longer(cols = everything(), names_to = "Type", values_to = "Nombre") %>%
-      ggplot(aes(x = Type, y = Nombre, fill = Type)) +
-      geom_col(show.legend = FALSE) +
-      labs(title = "Répartition des types de vélos", x = "", y = "Nombre") +
-      theme_minimal()
+  
+  output$bar_dept <- renderPlot({
+    musees %>%
+      count(departement, sort = TRUE) %>%
+      top_n(10) %>%
+      ggplot(aes(x = reorder(departement, n), y = n)) +
+      geom_col(fill = "darkgreen") +
+      coord_flip() +
+      labs(x = "Département", y = "Nombre de musées", title = "Top 10 départements")
   })
+  
+  prox_data <- reactiveVal()
+  
+  observeEvent(input$go, {
+    req(input$address)
+    result <- tryCatch({
+      geocode_OSM(input$address)
+    }, error = function(e) NULL)
+    
+    if (is.null(result)) return(NULL)
+    
+    user_lat <- result$coords["y"]
+    user_lon <- result$coords["x"]
+    
+    nearby <- musees %>%
+      mutate(dist_km = geosphere::distHaversine(cbind(longitude, latitude), c(user_lon, user_lat)) / 1000) %>%
+      filter(dist_km <= input$radius) %>%
+      arrange(dist_km)
+    
+    prox_data(nearby)
+    
+    output$prox_map <- renderLeaflet({
+      icons_musee <- awesomeIcons(
+        icon = 'university', library = 'fa',
+        markerColor = 'blue'
+      )
+      leaflet(data = nearby) %>%
+        addTiles() %>%
+        addAwesomeMarkers(lng = user_lon, lat = user_lat, popup = "📍 Votre adresse", icon = awesomeIcons(icon = 'home', markerColor = 'red')) %>%
+        addAwesomeMarkers(
+          lng = ~longitude, lat = ~latitude, icon = icons_musee,
+          popup = ~paste0("<b>", nom, "</b><br>", adresse, "<br>", ville, "<br>", round(dist_km, 2), " km")
+        )
+    })
+    
+    output$prox_table <- renderDT({
+      nearby %>%
+        select(nom, adresse, ville, cp, telephone, url, dist_km) %>%
+        datatable(options = list(pageLength = 10))
+    })
+  })
+  
+  output$download_prox <- downloadHandler(
+    filename = function() {"musees_proximite.csv"},
+    content = function(file) {
+      write.csv(prox_data(), file, row.names = FALSE)
+    }
+  )
 }
 
 shinyApp(ui, server)
